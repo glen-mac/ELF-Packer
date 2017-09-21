@@ -35,6 +35,8 @@ class Elf():
         self.data = data
 
     """
+    Parse the ELF header of the binary
+
     e_ident:        marks the file as an object file
     e_type:         identifies the object file type
     e_machine:      specifies the required architecture of the file
@@ -61,6 +63,8 @@ class Elf():
         logging.debug(f"object file type:\t{ETYPE_DIC[self.e_type]}")
 
     """
+    Parse sections of the Section Header Table
+
     sh_name:        index into the string table of the section name
     sh_type:        categorizes the sections contents and semantics
     sh_flags:       flags that describe miscellaneous attributes
@@ -73,7 +77,7 @@ class Elf():
     sh_entsize:     size in bytes of each entry of section-fixed size table
         """
 
-    def parse_sections(self):
+    def parse_sections_header(self):
         self.sections = []
         section_header_sz = self.e_shnum * self.e_shentsize
         section_table = self.data[self.e_shoff:
@@ -89,7 +93,19 @@ class Elf():
             sec = Section(sh_name, sh_type, sh_flags, sh_addr, sh_offset,
                           sh_size, sh_link, sh_info, sh_addralign, sh_entsize)
             self.sections.append(sec)
-            logging.debug(f"Section with name: {sh_name}")
+
+            #logging.debug(f"Section with name: {self.get_string(sh_name)}")
+
+    def get_string(self, index):
+        elf_str = ''
+        char = self.data[self.e_shstrndx + index]
+        logging.debug(f"string table offset is: {self.e_shstrndx}")
+        while (char != b'\x00'):
+            index += 1
+            elf_str += chr(char)
+            char = self.data[self.e_shstrndx + index]
+        logging.debug(f"got string ({index}): '{elf_str}'")
+        return elf_str
 
 
 if __name__ == '__main__':
@@ -116,4 +132,5 @@ if __name__ == '__main__':
 
     binary = Elf(name=sys.argv[1], data=elf_data)
     binary.parse_header()
+    binary.parse_sections_header()
     binary.parse_sections()
