@@ -1,3 +1,4 @@
+from enum import Enum
 import sys
 import logging
 from struct import *
@@ -13,6 +14,25 @@ ETYPE_DIC = {
     4: 'Core file'
 }
 
+
+# Enum of the section types
+class SectionType(Enum):
+    SHT_NULL = 0
+    SHT_PROGBITS = 1
+    SHT_SYMTAB = 2
+    SHT_STRTAB = 3
+    SHT_RELA = 4
+    SHT_HASH = 5
+    SHT_DYNAMIC = 6
+    SHT_NOTE = 7
+    SHT_NOBITS = 8
+    SHT_REL = 9
+    SHT_SHLIB = 10
+    SHT_DYNSYM = 11
+    SHT_LOPROC = 0x70000000
+    SHT_HIPROC = 0x7fffffff
+    SHT_LOUSER = 0x80000000
+    SHT_HIUSER = 0xffffffff
 
 class Section():
     def __init__(self, sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size,
@@ -78,7 +98,8 @@ class Elf():
         """
 
     def parse_sections_header(self):
-        self.sections = []
+        # dictionary of arrays indexed by section type
+        self.sections = {}
         section_header_sz = self.e_shnum * self.e_shentsize
         section_table = self.data[self.e_shoff:
                                   self.e_shoff + section_header_sz]
@@ -92,7 +113,10 @@ class Elf():
             # create the section
             sec = Section(sh_name, sh_type, sh_flags, sh_addr, sh_offset,
                           sh_size, sh_link, sh_info, sh_addralign, sh_entsize)
-            self.sections.append(sec)
+            if (not self.sections.get(sh_type)):
+                self.sections[sh_type] = []
+            self.sections[sh_type].append(sec)
+
 
             #logging.debug(f"Section with name: {self.get_string(sh_name)}")
 
