@@ -3,9 +3,15 @@ import sys
 import logging
 from pwn import *
 from struct import *
+from optparse import OptionParser
 
-EI_NIDENT = 16
-ELF32_EHDR_SZ = 36 + EI_NIDENT
+parser = OptionParser()
+parser.add_option("-f", "--file", dest="filename",
+                  help="the ELF file to pack", metavar="FILE")
+parser.add_option("-b", "--bits", dest="bits",
+                  help="the ELF arch to use (32/64)", metavar="BITS")
+(options, args) = parser.parse_args()
+
 
 ETYPE_DIC = {
     0: 'No file type',
@@ -63,9 +69,12 @@ class Section():
         """
 
 class Elf():
-    def __init__(self, name="", data=[]):
+    def __init__(self, name="", data=[], bits=''):
         self.name = name
         self.data = data
+        self.bits = int(bits)
+        self.EI_NIDENT = 16 
+        self.ELF_EHDR_SZ = 36 + self.EI_NIDENT if self.bits == 32 else 48 + self.EI_NIDENT
 
     """
     Parse the ELF header of the binary
@@ -87,11 +96,12 @@ class Elf():
     """
 
     def parse_header(self):
+        unpack_str = f"{self.EI_NIDENT}sHHIQQQIHHHHHH" if self.bits == 64 else f"{self.EI_NIDENT}sHHIIIIIHHHHHH"
         (self.e_ident, self.e_type, self.e_machine, self.e_version,
          self.e_entry, self.e_phoff, self.e_shoff, self.e_flags, self.e_ehsize,
          self.e_phentsize, self.e_phnum,
          self.e_shentsize, self.e_shnum, self.e_shstrndx) = unpack(
-             f"{EI_NIDENT}sHHIIIIIHHHHHH", self.data[:ELF32_EHDR_SZ])
+             unpack_str, self.data[:self.ELF_EHDR_SZ])
         logging.debug(f"entry point found:\t{hex(self.e_entry)}")
         logging.debug(f"object file type:\t{ETYPE_DIC[self.e_type]}")
 
@@ -111,6 +121,7 @@ class Elf():
     """
 
     def parse_sections_header(self):
+        unpack_str = "IIQQQQIIQQ" if self.bits == 64 else "IIIIIIIIII"
         # dictionary of arrays indexed by section type
         self.sections = {}
         section_header_sz = self.e_shnum * self.e_shentsize
@@ -122,7 +133,7 @@ class Elf():
             # unpack the section data
             (sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link,
              sh_info, sh_addralign, sh_entsize) = unpack(
-                 'IIIIIIIIII',
+                 unpack_str,
                  section_table[sec_index * self.e_shentsize:sec_index * self.
                                e_shentsize + self.e_shentsize])
             # create the section
@@ -190,27 +201,35 @@ class Elf():
             self.data[text_sec.sh_offset + i] ^= key
 
     def change_ep(self, new_ep):
-        self.data[24:24+4] = p32(new_ep)
+        if self.bits == 32:
+            self.data[24:24+4] = p32(new_ep)
+        else:
+            self.data[24:24+8] = p64(new_ep)
     
     def create_unpacker(self):
         text_sec = self.get_section('.text')
-        text_addr = text_sec.sh_addr & 0xFFFFF000
+        text_addr = text_sec.sh_addr & 0xFFFFFFFFFFFFF000 if self.bits == 64 else text_sec.sh_addr & 0xFFFFF000
+        syscall_str = 'int 0x80' if self.bits == 32 else 'syscall'
+        register_prefix = 'r' if self.bits == 64 else 'e'
+        syscall_num = '0x7d' if self.bits == 32 else '10'
+        syscall_reg_1 = 'di' if self.bits == 64 else 'bx'
+        syscall_reg_2 = 'si' if self.bits == 64 else 'cx'
         unpacker_asm = asm(f"""
-        push eax
-        push edi
-        push esi
-        push edx
-        push ecx
+        push {register_prefix}ax
+        push {register_prefix}di
+        push {register_prefix}si
+        push {register_prefix}dx
+        push {register_prefix}cx
 
-        mov eax, 0x7d
-        mov ebx, {text_addr}
-        mov ecx, {text_sec.sh_size}
-        mov edx, 0x7 
-        int 0x80 
+        mov {register_prefix}ax, {syscall_num}
+        mov {register_prefix}{syscall_reg_1}, {text_addr}
+        mov {register_prefix}{syscall_reg_2}, {text_sec.sh_size}
+        mov {register_prefix}dx, 0x7 
+        {syscall_str} 
 
-        mov edi, {text_sec.sh_addr}
-        mov esi, edi
-        mov ecx, {text_sec.sh_size}
+        mov {register_prefix}di, {text_sec.sh_addr}
+        mov {register_prefix}si, {register_prefix}di
+        mov {register_prefix}cx, {text_sec.sh_size}
         cld
         decrypt:
             lodsb
@@ -218,17 +237,17 @@ class Elf():
             stosb
             loop decrypt
 
-        mov eax, 0x7d
-        mov ebx, {text_addr}
-        mov ecx, {text_sec.sh_size}
-        mov edx, 0x5
-        int 0x80
+        mov {register_prefix}ax, {syscall_num}
+        mov {register_prefix}{syscall_reg_1}, {text_addr}
+        mov {register_prefix}{syscall_reg_2}, {text_sec.sh_size}
+        mov {register_prefix}dx, 0x5
+        {syscall_str}
 
-        pop ecx
-        pop edx
-        pop esi
-        pop edi
-        pop eax
+        pop {register_prefix}cx
+        pop {register_prefix}dx
+        pop {register_prefix}si
+        pop {register_prefix}di
+        pop {register_prefix}ax
  
         push {self.e_entry}
         ret
@@ -241,29 +260,28 @@ class Elf():
 # binary.write_unpacker(unpacker_asm, unpacker_off) 
 if __name__ == '__main__':
 
-    context.arch = 'i386'
+    if options.bits == '32':
+        context.arch = 'i386'
+    else:
+        context.arch = 'amd64'
 
     logging.basicConfig(
         format='%(levelname)s:\t%(message)s', level=logging.DEBUG)
 
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <file.elf>")
-        sys.exit(1)
-
     # load data into memory
     try:
-        with open(sys.argv[1], 'rb') as f:
+        with open(options.filename, 'rb') as f:
             elf_data = bytearray(f.read())
     except:
-        print(f"ERROR: Failed opening file: {sys.argv[1]}")
+        print(f"ERROR: Failed opening file: {options.filename}")
         sys.exit(1)
 
     # check header
     if elf_data[:4] != b'\x7fELF':
-        print(f"ERROR: File: {sys.argv[1]} is not an ELF file")
+        print(f"ERROR: File: {options.filename} is not an ELF file")
         sys.exit(1)
 
-    binary = Elf(name=sys.argv[1], data=elf_data)
+    binary = Elf(name=options.filename, data=elf_data, bits=options.bits)
     binary.parse_header()
     binary.parse_sections_header()
     binary.pack_code(0xa5)
@@ -274,6 +292,6 @@ if __name__ == '__main__':
     binary.write_unpacker(unpacker_asm, unpacker_off) 
 
     # save packed binary to new file
-    with open(f"{sys.argv[1]}.packed", 'wb') as f:
+    with open(f"{options.filename}.packed", 'wb') as f:
         f.write(binary.data)
         
