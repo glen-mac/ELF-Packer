@@ -1,6 +1,7 @@
 from enum import Enum
 import sys
 import logging
+from pwn import *
 from struct import *
 
 EI_NIDENT = 16
@@ -47,7 +48,19 @@ class Section():
         self.sh_info = sh_info
         self.sh_addralign = sh_addralign
         self.sh_entsize = sh_entsize
-
+    def __str__(self):
+        return f"""[Start Section '{self.name}']
+        sh_name      = {hex(self.sh_name)}
+        sh_type      = {hex(self.sh_type)}
+        sh_flags     = {hex(self.sh_flags)}
+        sh_addr      = {hex(self.sh_addr)}
+        sh_offset    = {hex(self.sh_offset)}
+        sh_size      = {hex(self.sh_size)}
+        sh_link      = {hex(self.sh_link)}
+        sh_info      = {hex(self.sh_info)}
+        sh_addralign = {hex(self.sh_addralign)}
+        sh_entsize   = {hex(self.sh_entsize)}
+        """
 
 class Elf():
     def __init__(self, name="", data=[]):
@@ -95,7 +108,7 @@ class Elf():
     sh_info:        holds extra information depending on section type
     sh_addralign:   dictates if the section has some form of size alignment
     sh_entsize:     size in bytes of each entry of section-fixed size table
-        """
+    """
 
     def parse_sections_header(self):
         # dictionary of arrays indexed by section type
@@ -103,7 +116,9 @@ class Elf():
         section_header_sz = self.e_shnum * self.e_shentsize
         section_table = self.data[self.e_shoff:
                                   self.e_shoff + section_header_sz]
-        for sec_index in range(1, self.e_shnum + 1):
+        # skip the first section in the section header table
+        # e_shstrndx:     index of the section header table for string table
+        for sec_index in range(1, self.e_shnum):
             # unpack the section data
             (sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link,
              sh_info, sh_addralign, sh_entsize) = unpack(
@@ -116,23 +131,117 @@ class Elf():
             if (not self.sections.get(sh_type)):
                 self.sections[sh_type] = []
             self.sections[sh_type].append(sec)
-
-
-            #logging.debug(f"Section with name: {self.get_string(sh_name)}")
+            if sec_index == self.e_shstrndx:
+                self.string_table_offset = sh_offset
+        
+        # add the section name to each section object
+        for sec_type in self.sections.keys():
+            for sec in self.sections.get(sec_type):
+                sec.name = self.get_string(sec.sh_name)   
+                logging.debug(sec)
+    
+    def find_cave(self, required_size):
+        # ensure that we don't look at 'SHT_NOBITS' sections
+        for sec_type in self.sections.keys():
+            for sec in self.sections.get(sec_type):
+                if sec.sh_type == SectionType.SHT_NOBITS:
+                    continue
+                index = 0
+                seen_nulls = 0
+                checkpoint = 0
+                while (index < sec.sh_size):
+                    char = self.data[sec.sh_offset + index]
+                    index+=1
+                    if char == 0:
+                        seen_nulls += 1
+                    else:
+                        checkpoint = index
+                        seen_nulls = 0
+                    if seen_nulls == required_size:
+                        break
+                if seen_nulls < required_size:
+                    continue
+                logging.debug(f"""found a code cave in section: {sec.name} with
+                        required size of {required_size} bytes at address
+                        {hex(sec.sh_offset + checkpoint)} in the file. The address in memory
+                        would be {hex(sec.sh_addr + index)}""")
+                return (sec.sh_addr + checkpoint, sec.sh_offset + checkpoint)
+        logging.error("no code cave found")
 
     def get_string(self, index):
         elf_str = ''
-        char = self.data[self.e_shstrndx + index]
-        logging.debug(f"string table offset is: {self.e_shstrndx}")
-        while (char != b'\x00'):
+        char = self.data[self.string_table_offset + index]
+        while (char != 0):
             index += 1
             elf_str += chr(char)
-            char = self.data[self.e_shstrndx + index]
-        logging.debug(f"got string ({index}): '{elf_str}'")
+            char = self.data[self.string_table_offset + index]
         return elf_str
 
+    def get_section(self, name):
+        for sec_type in self.sections.keys():
+            for sec in self.sections.get(sec_type):
+                if sec.name == name:
+                    return sec
 
+
+    def pack_code(self, key):
+        text_sec = self.get_section('.text')
+        for i in range(text_sec.sh_size):
+            self.data[text_sec.sh_offset + i] ^= key
+
+    def change_ep(self, new_ep):
+        self.data[24:24+4] = p32(new_ep)
+    
+    def create_unpacker(self):
+        text_sec = self.get_section('.text')
+        text_addr = text_sec.sh_addr & 0xFFFFF000
+        unpacker_asm = asm(f"""
+        push eax
+        push edi
+        push esi
+        push edx
+        push ecx
+
+        mov eax, 0x7d
+        mov ebx, {text_addr}
+        mov ecx, {text_sec.sh_size}
+        mov edx, 0x7 
+        int 0x80 
+
+        mov edi, {text_sec.sh_addr}
+        mov esi, edi
+        mov ecx, {text_sec.sh_size}
+        cld
+        decrypt:
+            lodsb
+            xor al, 0xa5
+            stosb
+            loop decrypt
+
+        mov eax, 0x7d
+        mov ebx, {text_addr}
+        mov ecx, {text_sec.sh_size}
+        mov edx, 0x5
+        int 0x80
+
+        pop ecx
+        pop edx
+        pop esi
+        pop edi
+        pop eax
+ 
+        push {self.e_entry}
+        ret
+        """)
+        return unpacker_asm
+
+    def write_unpacker(self, asm, off):
+        self.data[unpacker_off:unpacker_off+len(asm)] = asm
+
+# binary.write_unpacker(unpacker_asm, unpacker_off) 
 if __name__ == '__main__':
+
+    context.arch = 'i386'
 
     logging.basicConfig(
         format='%(levelname)s:\t%(message)s', level=logging.DEBUG)
@@ -157,4 +266,14 @@ if __name__ == '__main__':
     binary = Elf(name=sys.argv[1], data=elf_data)
     binary.parse_header()
     binary.parse_sections_header()
-    binary.parse_sections()
+    binary.pack_code(0xa5)
+    unpacker_asm = binary.create_unpacker()
+    logging.debug(f"need {len(unpacker_asm)} bytes in a cave")
+    (unpacker_addr, unpacker_off) = binary.find_cave(len(unpacker_asm))
+    binary.change_ep(unpacker_addr)
+    binary.write_unpacker(unpacker_asm, unpacker_off) 
+
+    # save packed binary to new file
+    with open(f"{sys.argv[1]}.packed", 'wb') as f:
+        f.write(binary.data)
+        
