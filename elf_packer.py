@@ -1,4 +1,5 @@
 from enum import Enum
+from os import path
 import sys
 import logging
 from pwn import *
@@ -69,11 +70,12 @@ class Section():
         """
 
 class Elf():
-    def __init__(self, name="", data=[], bits=''):
+    def __init__(self, name="", data=[], bits='', size=0):
         self.name = name
         self.data = data
         self.bits = int(bits)
         self.EI_NIDENT = 16 
+        self.size = size
         self.ELF_EHDR_SZ = 36 + self.EI_NIDENT if self.bits == 32 else 48 + self.EI_NIDENT
 
     """
@@ -214,13 +216,166 @@ class Elf():
         syscall_num = '0x7d' if self.bits == 32 else '10'
         syscall_reg_1 = 'di' if self.bits == 64 else 'bx'
         syscall_reg_2 = 'si' if self.bits == 64 else 'cx'
-        unpacker_asm = asm(f"""
-        push {register_prefix}ax
-        push {register_prefix}di
-        push {register_prefix}si
-        push {register_prefix}dx
-        push {register_prefix}cx
+        syscall_reg_2 = 'si' if self.bits == 64 else 'cx'
+        syscall_reg_2 = 'si' if self.bits == 64 else 'cx'
+        integer_size = 4 if self.bits == 32 else 8
+        file_offset = 1337
+        offset_to_xor_byte = 22
+        # polypack_asm = asm(f"")
+        
+        # mov eip to a register? - no because file mapping is different..
+        # can pull out the text section from here? but horrible assembly lol
 
+        # store the file offset of text section as a push instruction with an immediate value
+        # this will work because it carries on from the initial packing 
+        
+        unpacker_asm = asm(f"""
+        /* blah */
+        call save_ip
+        save_ip:
+        
+        /* open executable */
+        mov rax, 2
+        mov rdi, [{register_prefix}sp + {2 * integer_size}]
+        push rdi # store the name
+        mov rsi, O_RDONLY
+        {syscall_str}
+        mov r15, rax # store for closing
+        
+        /* mmap the executable */
+        mov r8, rax             
+        mov rax, 9              
+        mov rdi, 0              
+        mov rsi, {self.size}           
+        mov rdx, PROT_READ     
+        mov r10, MAP_PRIVATE
+        mov r9, 0   
+        {syscall_str}
+        mov r14, rax
+
+        /* open new executable */
+        mov rax, 0x0062612f706d742f # /tmp/abc
+        push rax
+        
+        /* remove old /tmp/ab */
+        mov rax, 87
+        mov rdi, rsp
+        {syscall_str}
+        
+        /* continue open new executable */
+        mov rax, 2
+        mov rdi, rsp
+        mov rsi, O_RDWR | O_CREAT
+        mov rdx, 0x1FF
+        {syscall_str}
+        mov r12, rax
+
+        mov rax, 77
+        mov rdi, r12
+        mov rsi, {self.size}
+        {syscall_str}
+
+        /* mmap the new executable */
+        mov rax, 9              
+        mov rdi, 0              
+        mov rsi, {self.size}           
+        mov rdx, PROT_READ | PROT_WRITE     
+        mov r10, MAP_SHARED
+        mov r8, r12             
+        mov r9, 0  
+        {syscall_str}
+        mov r13, rax # store the mapping addr for encryption
+
+        /* memcpy between mappings */
+        mov rdi, rax         # the new file
+        mov rsi, r14         # the executable file
+        mov {register_prefix}cx, {self.size}  # the size of the file
+        xor rax, rax
+        copy:
+            mov al, [rsi]
+            mov [rdi], al
+            inc rdi
+            inc rsi
+            dec rcx
+            cmp rcx, 0
+            jnz copy
+
+        /* munmap the executable file */
+        mov rax, 11
+        mov rdi, r14
+        mov rsi, {self.size}
+        {syscall_str}
+    
+        /* close the executable */
+        mov rax, 3
+        mov rdi, r15
+        {syscall_str}
+
+        /* unlink the original executable file */
+        mov rax, 87
+        mov rdi, [rsp + 8]
+        {syscall_str}
+
+        /* move the new exec to where the old one was */
+        mov rax, 82
+        mov rdi, rsp
+        mov rsi, [rsp + 8]
+        {syscall_str}
+
+        /* decrypt the new executable */
+        mov rdi, r13    # the new file mapping addr
+        add rdi, {text_sec.sh_offset} # increment to the text offset
+        mov rsi, rdi          # the executable file
+        mov {register_prefix}cx, {text_sec.sh_size}  # the size of the file
+        xor rbx, rbx          # blank the register for the bytes
+        mov bl, [rip + 0x9f]  # the xor byte for this current process
+        cld
+        recrypt_file1:
+            lodsb
+            xor rax, rbx
+            stosb
+            loop recrypt_file1
+
+        /* replace the decrypt byte */
+        mov rdi, r13
+        mov rax, [rsp + 16]
+        sub rax, 0x3ffe1f # minus 4, minus 0x400000 then plus 0x1ea for offset
+        add rdi, rax
+        /* get new random byte */
+        mov rax, 318
+        mov rsi, 1
+        xor rdx, rdx
+        /* end new random byte */
+        syscall
+        xor rbx, rbx
+        mov rbx, [rdi]
+
+        /* recrypt the new executable */
+        mov rdi, r13    # the new file mapping addr
+        add rdi, {text_sec.sh_offset} # increment to the text offset
+        mov rsi, rdi          # the executable file
+        mov {register_prefix}cx, {text_sec.sh_size}  # the size of the file
+        cld
+        recrypt_file2:
+            lodsb
+            xor rax, rbx
+            stosb
+            loop recrypt_file2
+
+        /* munmap new exectuable */
+        mov rax, 11
+        mov rdi, r13
+        mov rsi, {self.size}
+        {syscall_str}
+
+        /* close new executable */
+        mov rax, 3
+        mov rdi, r12
+        {syscall_str}
+
+        /* ~~~~ end polypacking ~~~~ */
+
+        /* mprotect the current proc's text section */
         mov {register_prefix}ax, {syscall_num}
         mov {register_prefix}{syscall_reg_1}, {text_addr}
         mov {register_prefix}{syscall_reg_2}, {text_sec.sh_size}
@@ -243,12 +398,13 @@ class Elf():
         mov {register_prefix}dx, 0x5
         {syscall_str}
 
-        pop {register_prefix}cx
-        pop {register_prefix}dx
-        pop {register_prefix}si
-        pop {register_prefix}di
-        pop {register_prefix}ax
- 
+        add rsp, 24
+        xor rsi, rsi
+        xor rdi, rdi
+        xor rdx, rdx
+        xor rcx, rcx
+        xor rbx, rbx
+        xor rax, rax
         push {self.e_entry}
         ret
         """)
@@ -281,7 +437,7 @@ if __name__ == '__main__':
         print(f"ERROR: File: {options.filename} is not an ELF file")
         sys.exit(1)
 
-    binary = Elf(name=options.filename, data=elf_data, bits=options.bits)
+    binary = Elf(name=options.filename, data=elf_data, bits=options.bits, size=path.getsize(options.filename))
     binary.parse_header()
     binary.parse_sections_header()
     binary.pack_code(0xa5)
