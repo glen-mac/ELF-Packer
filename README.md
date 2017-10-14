@@ -1,8 +1,8 @@
 # Simple Polymorphic x86\_64 Runtime Code Segment Cryptor
----
+
 ## *These are not the bytes you are looking for*
 
-This little project is a simple polymorphic runtime cryptor for x86_64 ELF binaries on linux. I wrote this for the extended digital forensics course at my university, but thought I would share publically because why not - learning and things.
+This little project is a super simple polymorphic runtime cryptor for x86_64 ELF binaries on linux. I wrote this for the extended digital forensics course at my university, but thought I would share publically because why not - learning and things.
 
 ## What does it do?
 
@@ -14,8 +14,8 @@ The stub however will (my making a new file) modify the executable on every exec
 
 ## Where to go?
 
-This was just for a small assessment task, so was mainly just a fun task. Although there are some issues with it such as:
-- Only support for 64 bit binaries (easy fix - just rewrite the stub assembly - the rest of the code will work for 32/64 bit ELFs)
+This was just for a small assessment task, so was mainly just fun. Although there are some issues with it such as:
+- Only support for 64 bit binaries (easy fix - just write the stub assembly - the rest of the code will work for 32/64 bit ELFs)
 - Too simple "encryption" - although was just for POC
 
 ## Can I see it in action?
