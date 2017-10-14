@@ -1,18 +1,32 @@
-from enum import Enum
-from os import path
 import sys
 import logging
+import stat
+from enum import Enum
+from os import path
 from pwn import *
 from struct import *
 from optparse import OptionParser
 
 parser = OptionParser()
-parser.add_option("-f", "--file", dest="filename",
-                  help="the ELF file to pack", metavar="FILE")
-parser.add_option("-b", "--bits", dest="bits",
-                  help="the ELF arch to use (32/64)", metavar="BITS")
+parser.add_option(
+    "-f",
+    "--file",
+    dest="filename",
+    help="the ELF file to pack",
+    metavar="FILE")
+parser.add_option(
+    "-b",
+    "--bits",
+    dest="bits",
+    help="the ELF arch to use (32/64)",
+    metavar="BITS")
+parser.add_option(
+    "-d",
+    "--debug",
+    dest="debug",
+    help="print debug statements",
+    metavar="DEBUG")
 (options, args) = parser.parse_args()
-
 
 ETYPE_DIC = {
     0: 'No file type',
@@ -42,6 +56,7 @@ class SectionType(Enum):
     SHT_LOUSER = 0x80000000
     SHT_HIUSER = 0xffffffff
 
+
 class Section():
     def __init__(self, sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size,
                  sh_link, sh_info, sh_addralign, sh_entsize):
@@ -55,6 +70,7 @@ class Section():
         self.sh_info = sh_info
         self.sh_addralign = sh_addralign
         self.sh_entsize = sh_entsize
+
     def __str__(self):
         return f"""[Start Section '{self.name}']
         sh_name      = {hex(self.sh_name)}
@@ -69,12 +85,13 @@ class Section():
         sh_entsize   = {hex(self.sh_entsize)}
         """
 
+
 class Elf():
     def __init__(self, name="", data=[], bits='', size=0):
         self.name = name
         self.data = data
         self.bits = int(bits)
-        self.EI_NIDENT = 16 
+        self.EI_NIDENT = 16
         self.size = size
         self.ELF_EHDR_SZ = 36 + self.EI_NIDENT if self.bits == 32 else 48 + self.EI_NIDENT
 
@@ -101,9 +118,8 @@ class Elf():
         unpack_str = f"{self.EI_NIDENT}sHHIQQQIHHHHHH" if self.bits == 64 else f"{self.EI_NIDENT}sHHIIIIIHHHHHH"
         (self.e_ident, self.e_type, self.e_machine, self.e_version,
          self.e_entry, self.e_phoff, self.e_shoff, self.e_flags, self.e_ehsize,
-         self.e_phentsize, self.e_phnum,
-         self.e_shentsize, self.e_shnum, self.e_shstrndx) = unpack(
-             unpack_str, self.data[:self.ELF_EHDR_SZ])
+         self.e_phentsize, self.e_phnum, self.e_shentsize, self.e_shnum,
+         self.e_shstrndx) = unpack(unpack_str, self.data[:self.ELF_EHDR_SZ])
         logging.debug(f"entry point found:\t{hex(self.e_entry)}")
         logging.debug(f"object file type:\t{ETYPE_DIC[self.e_type]}")
 
@@ -130,7 +146,6 @@ class Elf():
         section_table = self.data[self.e_shoff:
                                   self.e_shoff + section_header_sz]
         # skip the first section in the section header table
-        # e_shstrndx:     index of the section header table for string table
         for sec_index in range(1, self.e_shnum):
             # unpack the section data
             (sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link,
@@ -146,13 +161,13 @@ class Elf():
             self.sections[sh_type].append(sec)
             if sec_index == self.e_shstrndx:
                 self.string_table_offset = sh_offset
-        
+
         # add the section name to each section object
         for sec_type in self.sections.keys():
             for sec in self.sections.get(sec_type):
-                sec.name = self.get_string(sec.sh_name)   
+                sec.name = self.get_string(sec.sh_name)
                 logging.debug(sec)
-    
+
     def find_cave(self, required_size):
         # ensure that we don't look at 'SHT_NOBITS' sections
         for sec_type in self.sections.keys():
@@ -164,7 +179,7 @@ class Elf():
                 checkpoint = 0
                 while (index < sec.sh_size):
                     char = self.data[sec.sh_offset + index]
-                    index+=1
+                    index += 1
                     if char == 0:
                         seen_nulls += 1
                     else:
@@ -196,7 +211,6 @@ class Elf():
                 if sec.name == name:
                     return sec
 
-
     def pack_code(self, key):
         text_sec = self.get_section('.text')
         for i in range(text_sec.sh_size):
@@ -204,13 +218,16 @@ class Elf():
 
     def change_ep(self, new_ep):
         if self.bits == 32:
-            self.data[24:24+4] = p32(new_ep)
+            self.data[24:24 + 4] = p32(new_ep)
         else:
-            self.data[24:24+8] = p64(new_ep)
-    
-    def create_unpacker(self):
+            self.data[24:24 + 8] = p64(new_ep)
+
+    def create_unpacker(self, xor_byte):
         text_sec = self.get_section('.text')
-        text_addr = text_sec.sh_addr & 0xFFFFFFFFFFFFF000 if self.bits == 64 else text_sec.sh_addr & 0xFFFFF000
+        if self.bits == 64:
+            text_addr = text_sec.sh_addr & 0xFFFFFFFFFFFFF000
+        else:
+            text_addr = text_sec.sh_addr & 0xFFFFF000
         syscall_str = 'int 0x80' if self.bits == 32 else 'syscall'
         register_prefix = 'r' if self.bits == 64 else 'e'
         syscall_num = '0x7d' if self.bits == 32 else '10'
@@ -221,19 +238,12 @@ class Elf():
         integer_size = 4 if self.bits == 32 else 8
         file_offset = 1337
         offset_to_xor_byte = 22
-        # polypack_asm = asm(f"")
-        
-        # mov eip to a register? - no because file mapping is different..
-        # can pull out the text section from here? but horrible assembly lol
 
-        # store the file offset of text section as a push instruction with an immediate value
-        # this will work because it carries on from the initial packing 
-        
         unpacker_asm = asm(f"""
         /* blah */
         call save_ip
         save_ip:
-        
+
         /* open executable */
         mov rax, 2
         mov rdi, [{register_prefix}sp + {2 * integer_size}]
@@ -241,27 +251,27 @@ class Elf():
         mov rsi, O_RDONLY
         {syscall_str}
         mov r15, rax # store for closing
-        
+
         /* mmap the executable */
-        mov r8, rax             
-        mov rax, 9              
-        mov rdi, 0              
-        mov rsi, {self.size}           
-        mov rdx, PROT_READ     
+        mov r8, rax
+        mov rax, 9
+        mov rdi, 0
+        mov rsi, {self.size}
+        mov rdx, PROT_READ
         mov r10, MAP_PRIVATE
-        mov r9, 0   
+        mov r9, 0
         {syscall_str}
         mov r14, rax
 
         /* open new executable */
         mov rax, 0x0062612f706d742f # /tmp/abc
         push rax
-        
+
         /* remove old /tmp/ab */
         mov rax, 87
         mov rdi, rsp
         {syscall_str}
-        
+
         /* continue open new executable */
         mov rax, 2
         mov rdi, rsp
@@ -276,13 +286,13 @@ class Elf():
         {syscall_str}
 
         /* mmap the new executable */
-        mov rax, 9              
-        mov rdi, 0              
-        mov rsi, {self.size}           
-        mov rdx, PROT_READ | PROT_WRITE     
+        mov rax, 9
+        mov rdi, 0
+        mov rsi, {self.size}
+        mov rdx, PROT_READ | PROT_WRITE
         mov r10, MAP_SHARED
-        mov r8, r12             
-        mov r9, 0  
+        mov r8, r12
+        mov r9, 0
         {syscall_str}
         mov r13, rax # store the mapping addr for encryption
 
@@ -305,7 +315,7 @@ class Elf():
         mov rdi, r14
         mov rsi, {self.size}
         {syscall_str}
-    
+
         /* close the executable */
         mov rax, 3
         mov rdi, r15
@@ -379,8 +389,8 @@ class Elf():
         mov {register_prefix}ax, {syscall_num}
         mov {register_prefix}{syscall_reg_1}, {text_addr}
         mov {register_prefix}{syscall_reg_2}, {text_sec.sh_size}
-        mov {register_prefix}dx, 0x7 
-        {syscall_str} 
+        mov {register_prefix}dx, 0x7
+        {syscall_str}
 
         mov {register_prefix}di, {text_sec.sh_addr}
         mov {register_prefix}si, {register_prefix}di
@@ -388,7 +398,7 @@ class Elf():
         cld
         decrypt:
             lodsb
-            xor al, 0xa5
+            xor al, {xor_byte}
             stosb
             loop decrypt
 
@@ -411,11 +421,12 @@ class Elf():
         return unpacker_asm
 
     def write_unpacker(self, asm, off):
-        self.data[unpacker_off:unpacker_off+len(asm)] = asm
+        self.data[unpacker_off:unpacker_off + len(asm)] = asm
 
-# binary.write_unpacker(unpacker_asm, unpacker_off) 
+
 if __name__ == '__main__':
 
+    # check what arch we are packing for
     if options.bits == '32':
         context.arch = 'i386'
     else:
@@ -437,17 +448,26 @@ if __name__ == '__main__':
         print(f"ERROR: File: {options.filename} is not an ELF file")
         sys.exit(1)
 
-    binary = Elf(name=options.filename, data=elf_data, bits=options.bits, size=path.getsize(options.filename))
+    # perform the crypting
+    binary = Elf(
+        name=options.filename,
+        data=elf_data,
+        bits=options.bits,
+        size=path.getsize(options.filename))
     binary.parse_header()
     binary.parse_sections_header()
-    binary.pack_code(0xa5)
-    unpacker_asm = binary.create_unpacker()
-    logging.debug(f"need {len(unpacker_asm)} bytes in a cave")
+    xor_byte = ord(os.urandom(1))
+    binary.pack_code(xor_byte)
+    unpacker_asm = binary.create_unpacker(xor_byte)
+    logging.debug(f"Need {len(unpacker_asm)} bytes in a cave for unpacker")
     (unpacker_addr, unpacker_off) = binary.find_cave(len(unpacker_asm))
     binary.change_ep(unpacker_addr)
-    binary.write_unpacker(unpacker_asm, unpacker_off) 
+    binary.write_unpacker(unpacker_asm, unpacker_off)
 
     # save packed binary to new file
     with open(f"{options.filename}.packed", 'wb') as f:
         f.write(binary.data)
-        
+
+    # make new file executable
+    st = os.stat(f"{options.filename}.packed")
+    os.chmod(f"{options.filename}.packed", st.st_mode | stat.S_IEXEC)
